@@ -1,0 +1,105 @@
+
+name: Deploiement sur le VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: DepotExpress-deploiement
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Front/package-lock.json
+
+      - name: Installer les dependances Front
+        run: npm ci --prefix Front
+
+      - name: Compiler le Front
+        run: npm run build --prefix Front
+        env:
+          VITE_API_URL: /api
+
+      - name: Verifier les fichiers
+        run: |
+          test -f Back/Dockerfile
+          test -f Back/package.json
+          test -f Back/package-lock.json
+          test -f Back/server.js
+          test -f Front/dist/index.html
+
+      - name: Creer les archives
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          tar -czf "$RUNNER_TEMP/depotexpress-${COMMIT_SHA}-back.tar.gz" \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='node_modules' \
+            --exclude='.git' \
+            -C Back .
+
+          tar -czf "$RUNNER_TEMP/depotexpress-${COMMIT_SHA}-front.tar.gz" \
+            -C Front/dist .
+
+      - name: Configurer SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST_KNOW: ${{ secrets.VPS_HOST_KNOW }}
+        run: |
+          set -Eeuo pipefail
+
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$VPS_HOST_KNOW" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+      - name: Envoyer les archives au VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOTE }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          scp -i "$HOME/.ssh/deploy_key" \
+            -P "$VPS_PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/depotexpress-${COMMIT_SHA}-back.tar.gz" \
+            "$RUNNER_TEMP/depotexpress-${COMMIT_SHA}-front.tar.gz" \
+            "${VPS_USER}@${VPS_HOST}:/tmp/"
+
+      - name: Lancer le script de deploiement securise
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOTE }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -p "$VPS_PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "${VPS_USER}@${VPS_HOST}" \
+            "sudo -n /usr/local/sbin/deploy-depotexpress '${COMMIT_SHA}'"
